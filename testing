@@ -1,0 +1,1161 @@
+--[[
+    ============================================================
+      S H A D O W   H U B  —  Painel de Admin (LocalScript) v3
+      Jogo: Roube um Ovo / Steal an Egg
+      Coloque em: StarterPlayer > StarterPlayerScripts
+
+      v3:
+        - Modos de mira: Melhor do Dia / Sakura+egg / Anjos&Demônios+egg
+        - Instant Interact (expande alcance + hold 0 + dispara prompt)
+        - Auto coletar corrigido (interação real + retorno à base)
+        - Cronômetro de reset dos ovos (4,5 min por noite)
+        - Aviso de velocidade segura por bioma (guardians)
+        - Filtro que ignora Máquinas / Fusão / Portais
+    ============================================================
+]]
+
+--// ====================== SERVIÇOS ====================== //
+local Players            = game:GetService("Players")
+local TweenService       = game:GetService("TweenService")
+local UserInputService   = game:GetService("UserInputService")
+local ProximityPromptSvc = game:GetService("ProximityPromptService")
+
+local Player    = Players.LocalPlayer
+local PlayerGui = Player:WaitForChild("PlayerGui")
+
+--// ======================= TEMA ========================= //
+local Theme = {
+	Window     = Color3.fromRGB(15, 15, 21),
+	Panel      = Color3.fromRGB(24, 24, 33),
+	PanelLight = Color3.fromRGB(33, 33, 45),
+	Stroke     = Color3.fromRGB(72, 72, 100),
+	Accent     = Color3.fromRGB(124, 77, 255),
+	Accent2    = Color3.fromRGB(0, 190, 255),
+	Text       = Color3.fromRGB(240, 240, 250),
+	SubText    = Color3.fromRGB(148, 148, 175),
+	Success    = Color3.fromRGB(65, 220, 140),
+	Danger     = Color3.fromRGB(255, 92, 112),
+	Warning    = Color3.fromRGB(255, 190, 70),
+}
+
+--// ===== RARIDADES REAIS DO JOGO (10 tiers) ============= //
+local RARITY = {
+	["comum"]    = 1, ["common"]   = 1,
+	["incomum"]  = 2, ["uncommon"] = 2,
+	["raro"]     = 3, ["rare"]     = 3,
+	["epico"]    = 4, ["épico"]    = 4, ["epic"]     = 4,
+	["lendario"] = 5, ["lendário"] = 5, ["legendary"] = 5,
+	["mitico"]   = 6, ["mítico"]   = 6, ["mythic"]   = 6,
+	["cosmic"]   = 7, ["cosmico"]  = 7, ["cósmico"]  = 7,
+	["secret"]   = 8, ["secreto"]  = 8, ["shadow"]   = 8,
+	["eternal"]  = 9, ["eterno"]   = 9,
+	["divine"]   = 10, ["divino"]  = 10, ["oni"] = 10, ["tiger"] = 10,
+}
+
+--// ====== BIOLOGIA: velocidade recomendada p/ fugir ====== //
+local BIOME_SPEED = {
+	forest   = 0,
+	lake     = 900,
+	desert   = 10000,
+	jungle   = 40000,
+	snow     = 170000,
+	volcano  = 700000,
+	abyss    = nil,  -- sem dado confirmado
+	prehistoric = nil,
+	cosmic   = nil,
+	cherry   = nil,  -- Sakura
+	sakura   = nil,
+	titan    = nil,
+	angel    = nil,
+	demon    = nil,
+}
+
+local EGG_RESET_SECONDS = 270 -- cada noite no jogo = 4,5 min
+
+--// ====================== HELPERS ======================= //
+local function Round(parent, radius)
+	local c = Instance.new("UICorner")
+	c.CornerRadius = UDim.new(0, radius or 10)
+	c.Parent = parent
+	return c
+end
+
+local function Stroke(parent, color, transparency, thickness)
+	local s = Instance.new("UIStroke")
+	s.Color = color or Theme.Stroke
+	s.Transparency = transparency or 0
+	s.Thickness = thickness or 1
+	s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	s.Parent = parent
+	return s
+end
+
+local function Gradient(parent, c1, c2, rotation)
+	local g = Instance.new("UIGradient")
+	g.Color = ColorSequence.new(c1, c2)
+	g.Rotation = rotation or 90
+	g.Parent = parent
+	return g
+end
+
+local function Tween(obj, props, duration, style, dir)
+	local t = TweenService:Create(
+		obj,
+		TweenInfo.new(duration or 0.25, style or Enum.EasingStyle.Quad, dir or Enum.EasingDirection.Out),
+		props
+	)
+	t:Play()
+	return t
+end
+
+local function Label(parent, text, size, color, bold, pos, anchor)
+	local l = Instance.new("TextLabel")
+	l.BackgroundTransparency = 1
+	l.Size = size
+	l.Position = pos or UDim2.new(0,0,0,0)
+	l.AnchorPoint = anchor or Vector2.new(0,0)
+	l.Font = bold and Enum.Font.GothamBold or Enum.Font.Gotham
+	l.Text = text
+	l.TextColor3 = color or Theme.Text
+	l.TextSize = bold and 15 or 13
+	l.TextXAlignment = Enum.TextXAlignment.Left
+	l.Parent = parent
+	return l
+end
+
+--// ===================== ESTADO ======================== //
+local State = {
+	Mode        = "best",   -- best | sakura | angels | all
+	AutoSteal   = false,
+	AutoCollect = true,
+	AutoReturn  = true,     -- levar o ovo até a base
+	InstantInt  = true,     -- interação instantânea
+	AutoInteract= true,     -- interagir com tudo perto
+	SafeSpeed   = true,     -- avisar quando a velocidade for baixa
+	Speed       = 120,
+	Smooth      = true,
+	Target      = nil,
+	LastScore   = 0,
+	Open        = true,
+	CycleLeft   = EGG_RESET_SECONDS,
+}
+
+--// ================ CONSTRUÇÃO DA UI =================== //
+local gui = Instance.new("ScreenGui")
+gui.Name = "ShadowHub"
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.Parent = PlayerGui
+
+local shadow = Instance.new("Frame")
+shadow.Name = "Shadow"
+shadow.AnchorPoint = Vector2.new(0.5, 0.5)
+shadow.Position = UDim2.new(0.5, 0, 0.5, 0)
+shadow.Size = UDim2.fromOffset(528, 458)
+shadow.BackgroundColor3 = Color3.new(0,0,0)
+shadow.BackgroundTransparency = 0.55
+shadow.Parent = gui
+Round(shadow, 22)
+
+local window = Instance.new("Frame")
+window.Name = "Window"
+window.AnchorPoint = Vector2.new(0.5, 0.5)
+window.Position = UDim2.new(0.5, 0, 0.5, 0)
+window.Size = UDim2.fromOffset(500, 430)
+window.BackgroundColor3 = Theme.Window
+window.ClipsDescendants = true
+window.Parent = gui
+Round(window, 18)
+Stroke(window, Theme.Stroke, 0.25, 1)
+Gradient(window, Theme.Window, Color3.fromRGB(28, 20, 55), 115)
+
+local header = Instance.new("Frame")
+header.Name = "Header"
+header.Size = UDim2.new(1, 0, 0, 54)
+header.BackgroundColor3 = Theme.Panel
+header.BackgroundTransparency = 0.15
+header.Parent = window
+Round(header, 18)
+
+local headerFix = Instance.new("Frame")
+headerFix.Size = UDim2.new(1, 0, 0, 18)
+headerFix.Position = UDim2.new(0, 0, 1, -18)
+headerFix.BackgroundColor3 = Theme.Panel
+headerFix.BackgroundTransparency = 0.15
+headerFix.BorderSizePixel = 0
+headerFix.Parent = header
+
+local logo = Instance.new("Frame")
+logo.Size = UDim2.fromOffset(32, 32)
+logo.Position = UDim2.new(0, 12, 0.5, 0)
+logo.AnchorPoint = Vector2.new(0, 0.5)
+logo.BackgroundColor3 = Theme.Accent
+logo.Parent = header
+Round(logo, 10)
+Gradient(logo, Theme.Accent, Theme.Accent2, 45)
+
+local logoTxt = Label(logo, "SH", UDim2.fromScale(1,1), Theme.Text, true)
+logoTxt.TextXAlignment = Enum.TextXAlignment.Center
+logoTxt.TextSize = 14
+
+Label(header, "Shadow HUB", UDim2.fromOffset(150, 18), Theme.Text, true, UDim2.new(0, 54, 0, 11))
+Label(header, "Roube um Ovo • Painel Admin v3", UDim2.fromOffset(220, 14), Theme.SubText, false, UDim2.new(0, 54, 0, 30)).TextSize = 11
+
+-- cronômetro de reset dos ovos
+local timerLabel = Label(header, "Ovos novos em 4:30", UDim2.fromOffset(120, 12), Theme.Warning, true, UDim2.new(1, -190, 0.5, -6))
+timerLabel.TextXAlignment = Enum.TextXAlignment.Right
+timerLabel.TextSize = 10
+
+local btnMin = Instance.new("TextButton")
+btnMin.Size = UDim2.fromOffset(30, 30)
+btnMin.Position = UDim2.new(1, -72, 0.5, -15)
+btnMin.BackgroundColor3 = Theme.PanelLight
+btnMin.Text = "–"
+btnMin.TextColor3 = Theme.Text
+btnMin.Font = Enum.Font.GothamBold
+btnMin.TextSize = 18
+btnMin.AutoButtonColor = false
+btnMin.Parent = header
+Round(btnMin, 8)
+
+local btnClose = Instance.new("TextButton")
+btnClose.Size = UDim2.fromOffset(30, 30)
+btnClose.Position = UDim2.new(1, -38, 0.5, -15)
+btnClose.BackgroundColor3 = Theme.Danger
+btnClose.BackgroundTransparency = 0.75
+btnClose.Text = "×"
+btnClose.TextColor3 = Theme.Text
+btnClose.Font = Enum.Font.GothamBold
+btnClose.TextSize = 18
+btnClose.AutoButtonColor = false
+btnClose.Parent = header
+Round(btnClose, 8)
+
+--// ====================== ABAS ========================= //
+local tabBar = Instance.new("Frame")
+tabBar.Size = UDim2.new(1, -24, 0, 34)
+tabBar.Position = UDim2.new(0, 12, 0, 62)
+tabBar.BackgroundTransparency = 1
+tabBar.Parent = window
+
+local tabLayout = Instance.new("UIListLayout")
+tabLayout.FillDirection = Enum.FillDirection.Horizontal
+tabLayout.Padding = UDim.new(0, 8)
+tabLayout.Parent = tabBar
+
+local pages, tabButtons = {}, {}
+
+local function createTab(name, icon)
+	local btn = Instance.new("TextButton")
+	btn.Size = UDim2.fromOffset(130, 34)
+	btn.BackgroundColor3 = Theme.Panel
+	btn.BackgroundTransparency = 0.2
+	btn.AutoButtonColor = false
+	btn.Font = Enum.Font.GothamSemibold
+	btn.Text = icon .. "  " .. name
+	btn.TextColor3 = Theme.SubText
+	btn.TextSize = 12
+	btn.Parent = tabBar
+	Round(btn, 10)
+	Stroke(btn, Theme.Stroke, 0.7, 1)
+
+	local page = Instance.new("Frame")
+	page.Name = name
+	page.Size = UDim2.new(1, -24, 1, -110)
+	page.Position = UDim2.new(0, 12, 0, 104)
+	page.BackgroundTransparency = 1
+	page.Visible = false
+	page.Parent = window
+
+	local layout = Instance.new("UIListLayout")
+	layout.Padding = UDim.new(0, 10)
+	layout.SortOrder = Enum.SortOrder.LayoutOrder
+	layout.Parent = page
+
+	tabButtons[name] = btn
+	pages[name] = page
+	return page
+end
+
+--// ============== COMPONENTES DE UI ==================== //
+local function createToggle(parent, title, desc, default, order, callback)
+	local holder = Instance.new("Frame")
+	holder.Size = UDim2.new(1, 0, 0, 52)
+	holder.BackgroundColor3 = Theme.Panel
+	holder.BackgroundTransparency = 0.25
+	holder.LayoutOrder = order
+	holder.Parent = parent
+	Round(holder, 12)
+	Stroke(holder, Theme.Stroke, 0.75, 1)
+
+	Label(holder, title, UDim2.new(1, -90, 0, 16), Theme.Text, true, UDim2.new(0, 14, 0, 10)).TextSize = 13
+	Label(holder, desc, UDim2.new(1, -90, 0, 14), Theme.SubText, false, UDim2.new(0, 14, 0, 28)).TextSize = 11
+
+	local switch = Instance.new("TextButton")
+	switch.Size = UDim2.fromOffset(48, 26)
+	switch.Position = UDim2.new(1, -62, 0.5, -13)
+	switch.AutoButtonColor = false
+	switch.Text = ""
+	switch.BackgroundColor3 = Theme.PanelLight
+	switch.Parent = holder
+	Round(switch, 100)
+
+	local knob = Instance.new("Frame")
+	knob.Size = UDim2.fromOffset(20, 20)
+	knob.Position = UDim2.fromOffset(3, 3)
+	knob.BackgroundColor3 = Theme.Text
+	knob.Parent = switch
+	Round(knob, 100)
+
+	local on = default
+	local function render(instant)
+		local goalColor = on and Theme.Accent or Theme.PanelLight
+		local goalPos = on and UDim2.fromOffset(25, 3) or UDim2.fromOffset(3, 3)
+		if instant then
+			switch.BackgroundColor3 = goalColor
+			knob.Position = goalPos
+		else
+			Tween(switch, {BackgroundColor3 = goalColor}, 0.22)
+			Tween(knob, {Position = goalPos}, 0.22, Enum.EasingStyle.Back)
+		end
+	end
+	render(true)
+
+	switch.MouseButton1Click:Connect(function()
+		on = not on
+		render(false)
+		callback(on)
+	end)
+
+	holder.MouseEnter:Connect(function() Tween(holder, {BackgroundTransparency = 0.1}, 0.15) end)
+	holder.MouseLeave:Connect(function() Tween(holder, {BackgroundTransparency = 0.25}, 0.15) end)
+	return holder
+end
+
+local function createSlider(parent, title, min, max, default, order, callback)
+	local holder = Instance.new("Frame")
+	holder.Size = UDim2.new(1, 0, 0, 58)
+	holder.BackgroundColor3 = Theme.Panel
+	holder.BackgroundTransparency = 0.25
+	holder.LayoutOrder = order
+	holder.Parent = parent
+	Round(holder, 12)
+	Stroke(holder, Theme.Stroke, 0.75, 1)
+
+	local valueLabel = Label(holder, tostring(default), UDim2.fromOffset(60, 16), Theme.Accent2, true, UDim2.new(1, -70, 0, 10))
+	valueLabel.TextXAlignment = Enum.TextXAlignment.Right
+
+	Label(holder, title, UDim2.new(1, -90, 0, 16), Theme.Text, true, UDim2.new(0, 14, 0, 10)).TextSize = 13
+
+	local bar = Instance.new("Frame")
+	bar.Size = UDim2.new(1, -28, 0, 6)
+	bar.Position = UDim2.new(0, 14, 1, -20)
+	bar.BackgroundColor3 = Theme.PanelLight
+	bar.Parent = holder
+	Round(bar, 100)
+
+	local fill = Instance.new("Frame")
+	fill.Size = UDim2.fromScale((default - min) / (max - min), 1)
+	fill.BackgroundColor3 = Theme.Accent
+	fill.Parent = bar
+	Round(fill, 100)
+	Gradient(fill, Theme.Accent, Theme.Accent2, 0)
+
+	local drag = Instance.new("TextButton")
+	drag.Size = UDim2.fromOffset(16, 16)
+	drag.Position = UDim2.new(fill.Size.X.Scale, -8, 0.5, -8)
+	drag.BackgroundColor3 = Theme.Text
+	drag.Text = ""
+	drag.AutoButtonColor = false
+	drag.Parent = bar
+	Round(drag, 100)
+
+	local dragging = false
+	local function update(input)
+		local rel = math.clamp((input.Position.X - bar.AbsolutePosition.X) / bar.AbsoluteSize.X, 0, 1)
+		local val = math.floor(min + (max - min) * rel + 0.5)
+		fill.Size = UDim2.fromScale(rel, 1)
+		drag.Position = UDim2.new(rel, -8, 0.5, -8)
+		valueLabel.Text = tostring(val)
+		callback(val)
+	end
+
+	drag.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+		end
+	end)
+	bar.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			update(input)
+		end
+	end)
+	UserInputService.InputChanged:Connect(function(input)
+		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+			update(input)
+		end
+	end)
+	UserInputService.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = false
+		end
+	end)
+
+	return holder
+end
+
+local function createButton(parent, text, color, order, callback)
+	local btn = Instance.new("TextButton")
+	btn.Size = UDim2.new(1, 0, 0, 42)
+	btn.BackgroundColor3 = color or Theme.Accent
+	btn.AutoButtonColor = false
+	btn.Font = Enum.Font.GothamBold
+	btn.Text = text
+	btn.TextColor3 = Theme.Text
+	btn.TextSize = 13
+	btn.LayoutOrder = order
+	btn.Parent = parent
+	Round(btn, 12)
+	Gradient(btn, color or Theme.Accent, Theme.Accent2, 20)
+
+	btn.MouseEnter:Connect(function() Tween(btn, {BackgroundTransparency = 0.15}, 0.15) end)
+	btn.MouseLeave:Connect(function() Tween(btn, {BackgroundTransparency = 0}, 0.15) end)
+	btn.MouseButton1Down:Connect(function() Tween(btn, {Size = UDim2.new(1, -6, 0, 39)}, 0.1) end)
+	btn.MouseButton1Up:Connect(function()
+		Tween(btn, {Size = UDim2.new(1, 0, 0, 42)}, 0.15, Enum.EasingStyle.Back)
+		callback()
+	end)
+	return btn
+end
+
+-- seletor segmentado (modos de mira)
+local function createSegment(parent, options, defaultKey, order, callback)
+	local holder = Instance.new("Frame")
+	holder.Size = UDim2.new(1, 0, 0, 40)
+	holder.BackgroundTransparency = 1
+	holder.LayoutOrder = order
+	holder.Parent = parent
+
+	local layout = Instance.new("UIListLayout")
+	layout.FillDirection = Enum.FillDirection.Horizontal
+	layout.Padding = UDim.new(0, 8)
+	layout.Parent = holder
+
+	local buttons = {}
+	for _, opt in ipairs(options) do
+		local b = Instance.new("TextButton")
+		b.Size = UDim2.new(1 / #options, -6, 1, 0)
+		b.BackgroundColor3 = Theme.Panel
+		b.BackgroundTransparency = 0.25
+		b.AutoButtonColor = false
+		b.Font = Enum.Font.GothamSemibold
+		b.Text = opt[2]
+		b.TextSize = 11
+		b.TextColor3 = Theme.SubText
+		b.Parent = holder
+		Round(b, 10)
+		Stroke(b, Theme.Stroke, 0.7, 1)
+		buttons[opt[1]] = b
+
+		b.MouseButton1Click:Connect(function()
+			for k, other in pairs(buttons) do
+				local active = (k == opt[1])
+				Tween(other, {
+					TextColor3 = active and Theme.Text or Theme.SubText,
+					BackgroundTransparency = active and 0 or 0.25,
+				}, 0.18)
+				Stroke(other, active and Theme.Accent or Theme.Stroke, active and 0 or 0.7, 1)
+			end
+			callback(opt[1])
+		end)
+	end
+
+	local b0 = buttons[defaultKey]
+	if b0 then
+		b0.TextColor3 = Theme.Text
+		b0.BackgroundTransparency = 0
+		Stroke(b0, Theme.Accent, 0, 1)
+	end
+	return holder
+end
+
+--// ================= TOAST (aviso) ==================== //
+local toastHolder = Instance.new("Frame")
+toastHolder.Size = UDim2.fromOffset(280, 40)
+toastHolder.Position = UDim2.new(0.5, -140, 1, -70)
+toastHolder.BackgroundTransparency = 1
+toastHolder.Parent = gui
+
+local function notify(text, color)
+	local t = Instance.new("TextLabel")
+	t.Size = UDim2.fromOffset(280, 38)
+	t.BackgroundColor3 = Theme.Panel
+	t.BackgroundTransparency = 0.1
+	t.Font = Enum.Font.GothamSemibold
+	t.Text = text
+	t.TextColor3 = color or Theme.Text
+	t.TextSize = 12
+	t.Parent = toastHolder
+	Round(t, 12)
+	Stroke(t, color or Theme.Accent, 0.4, 1)
+	t.TextTransparency = 1
+	t.BackgroundTransparency = 1
+
+	Tween(t, {TextTransparency = 0, BackgroundTransparency = 0.1}, 0.25)
+	task.delay(2.2, function()
+		Tween(t, {TextTransparency = 1, BackgroundTransparency = 1}, 0.35)
+		task.wait(0.4)
+		t:Destroy()
+	end)
+end
+
+--// ================ PÁGINA: AUTO ROUBO ================= //
+local pageMain = createTab("Auto Roubo", "⚡")
+
+createSegment(pageMain, {
+	{"best",   "Melhor do Dia"},
+	{"sakura", "Sakura + Egg"},
+	{"angels", "Anjos & Demônios"},
+	{"all",    "Tudo"},
+}, "best", 1, function(key)
+	State.Mode = key
+	local names = {
+		best = "Melhor ovo do dia",
+		sakura = "Ovos Sakura (Cherry Blossom)",
+		angels = "Ovos de Anjos & Demônios",
+		all = "Todos os ovos (mais perto)",
+	}
+	notify("Mira: " .. names[key], Theme.Accent2)
+end)
+
+createToggle(pageMain, "Auto Roubar Ovos", "Vai no melhor ovo, interage e leva pra base", false, 2, function(v)
+	State.AutoSteal = v
+	notify(v and "⚡ Auto Roubo ATIVADO" or "Auto Roubo desativado", v and Theme.Success or Theme.SubText)
+end)
+
+createToggle(pageMain, "Auto Coletar", "Coleta ovos próximos com interação real", true, 3, function(v)
+	State.AutoCollect = v
+end)
+
+createToggle(pageMain, "Instant Interact", "Zera o hold e expande o alcance dos prompts", true, 4, function(v)
+	State.InstantInt = v
+end)
+
+createToggle(pageMain, "Auto Interagir", "Interage com tudo perto (incubadora, shrine...)", true, 5, function(v)
+	State.AutoInteract = v
+end)
+
+createToggle(pageMain, "Levar ovo até a Base", "Depois de roubar, volta pra base pra chocar", true, 6, function(v)
+	State.AutoReturn = v
+end)
+
+createToggle(pageMain, "Movimento Suave", "Tween suave em vez de teleporte seco", true, 7, function(v)
+	State.Smooth = v
+end)
+
+createSlider(pageMain, "Velocidade do roubo", 30, 400, 120, 8, function(v)
+	State.Speed = v
+end)
+
+createButton(pageMain, "🎯  IR PARA O ALVO AGORA", Theme.Accent, 9, function()
+	local egg = findBestEgg()
+	if egg then
+		goToEgg(egg)
+		notify("Indo até: " .. egg.Name, Theme.Success)
+	else
+		notify("Nenhum ovo encontrado no modo atual!", Theme.Danger)
+	end
+end)
+
+local targetInfo = Label(pageMain, "Alvo atual: nenhum", UDim2.new(1, 0, 0, 30), Theme.SubText, false)
+targetInfo.LayoutOrder = 10
+targetInfo.TextXAlignment = Enum.TextXAlignment.Center
+
+--// =============== PÁGINA: AJUSTES ===================== //
+local pageCfg = createTab("Ajustes", "🛠")
+
+createToggle(pageCfg, "Aviso de Velocidade Segura", "Alerta quando você não foge do guardian", true, 1, function(v)
+	State.SafeSpeed = v
+end)
+
+createButton(pageCfg, "✋  INTERAGIR AGORA (Instant)", Theme.PanelLight, 2, function()
+	local root = getRoot()
+	if root then
+		local n = interactNearby(root.Position, 25)
+		notify(n > 0 and ("Interagiu com " .. n .. " objeto(s)") or "Nada por perto para interagir", n > 0 and Theme.Success or Theme.SubText)
+	end
+end)
+
+createButton(pageCfg, "🏠  VOLTAR PARA A BASE", Theme.PanelLight, 3, function()
+	returnToBase()
+	notify("Voltando para a base", Theme.Accent2)
+end)
+
+createButton(pageCfg, "↺  REDEFINIR POSIÇÃO DA UI", Theme.PanelLight, 4, function()
+	window.Position = UDim2.new(0.5, 0, 0.5, 0)
+	shadow.Position = window.Position
+	notify("UI reposicionada")
+end)
+
+createButton(pageCfg, "👁  MOSTRAR / ESCONDER (RightShift)", Theme.PanelLight, 5, function()
+	toggleHub()
+end)
+
+createButton(pageCfg, "🔎  VER OVOS DETECTADOS (Debug)", Theme.PanelLight, 6, function()
+	debugListEggs()
+end)
+
+local info = Label(pageCfg, "Shadow HUB v3 • Atalho: RightShift • Minimizar: botão –\nAlvo escolhido por Valor/Raridade (Common → Divine)\nOvos resetam a cada 4,5 min (noite do jogo)", UDim2.new(1, 0, 0, 60), Theme.SubText, false)
+info.LayoutOrder = 7
+info.TextXAlignment = Enum.TextXAlignment.Center
+info.TextYAlignment = Enum.TextYAlignment.Top
+info.TextWrapped = true
+info.TextSize = 11
+
+--// ============ CONFIGURAÇÃO DOS OVOS ================== //
+local EGG_FOLDERS = {
+	workspace:FindFirstChild("Ovos") or workspace:FindFirstChild("Eggs"),
+}
+-- Ajuste aqui se seus ovos ficarem em outra pasta:
+-- local EGG_FOLDERS = { workspace:WaitForChild("Mapa"):WaitForChild("Ovos") }
+
+local BLACKLIST = {
+	"fusao", "fusion", "maquina", "machine", "máquina",
+	"loja", "shop", "npc", "vendedor", "vendor",
+	"hatch", "incubat", "chocar", "portal", "teleport",
+	"altar", "base", "spawnpoint", "botao", "button", "placa", "sign",
+	"shrine", "sacrifice", "rift", "index", "checklist",
+}
+
+local MAX_EGG_SIZE = 14
+
+-- Remotes do SEU jogo (preencha se quiser o caminho mais limpo):
+local PICKUP_REMOTE = nil -- ex: game.ReplicatedStorage.Events.CollectEgg
+local STEAL_REMOTE  = nil -- ex: game.ReplicatedStorage.Events.StealEgg
+
+--// ================= FILTROS =========================== //
+local function nameBlacklisted(name)
+	local n = name:lower()
+	for _, bad in ipairs(BLACKLIST) do
+		if n:find(bad, 1, true) then return true end
+	end
+	return false
+end
+
+local function getEggPart(obj)
+	if obj:IsA("BasePart") then return obj end
+	if obj:IsA("Model") then
+		return obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart", true)
+	end
+	return nil
+end
+
+local function isInEggFolder(obj)
+	for _, folder in ipairs(EGG_FOLDERS) do
+		if folder and obj:IsDescendantOf(folder) then return true end
+	end
+	return false
+end
+
+local function hasEggWord(n)
+	return (n:find("egg", 1, true) or n:find("ovo", 1, true)) and true or false
+end
+
+local function isEgg(obj)
+	if not (obj:IsA("Model") or obj:IsA("BasePart")) then return false end
+
+	local n = obj.Name:lower()
+	if not hasEggWord(n) then return false end
+	if nameBlacklisted(n) then return false end
+
+	local part = getEggPart(obj)
+	if not part then return false end
+	if part.Size.Magnitude > MAX_EGG_SIZE then return false end
+
+	local hasPrompt = obj:FindFirstChildWhichIsA("ProximityPrompt", true) ~= nil
+	local hasTouch  = obj:FindFirstChildWhichIsA("TouchTransmitter", true) ~= nil
+
+	return isInEggFolder(obj) or hasPrompt or hasTouch
+end
+
+-- modos de mira
+local function matchesMode(obj, mode)
+	local n = obj.Name:lower()
+	if mode == "best" or mode == "all" then return true end
+	if mode == "sakura" then
+		return n:find("sakura", 1, true) and hasEggWord(n)
+	end
+	if mode == "angels" then
+		local key = (n:find("angel", 1, true) or n:find("anjo", 1, true)
+			or n:find("demon", 1, true) or n:find("demônio", 1, true)
+			or n:find("demonio", 1, true) or n:find("light", 1, true)
+			or n:find("dark", 1, true))
+		return key and hasEggWord(n)
+	end
+	return true
+end
+
+local function eggScore(inst)
+	local part = getEggPart(inst)
+	if not part then return nil end
+
+	local value, rarity
+	for _, key in ipairs({"Value","EggValue","Price","Coins","Money","DayValue","Income","MoneyPerSecond","MPS","Reward"}) do
+		local v = inst:GetAttribute(key)
+		if typeof(v) == "number" then value = v break end
+	end
+
+	local r = inst:GetAttribute("Rarity") or inst:GetAttribute("Tier")
+	if typeof(r) == "number" then
+		rarity = r
+	elseif typeof(r) == "string" then
+		rarity = RARITY[r:lower()] or 0
+	end
+
+	if not rarity then
+		local n = inst.Name:lower()
+		for key, val in pairs(RARITY) do
+			if n:find(key, 1, true) then rarity = val break end
+		end
+	end
+
+	return (value or 0) * 10 + (rarity or 0) * 1000, part.Position
+end
+
+function findBestEgg()
+	local mode = State.Mode
+	local best, bestScore, bestPos = nil, -1, nil
+
+	for _, obj in ipairs(workspace:GetDescendants()) do
+		if isEgg(obj) and matchesMode(obj, mode) then
+			local score, pos = eggScore(obj)
+			if score then
+				local root = getRoot()
+				local dist = root and (pos - root.Position).Magnitude or 0
+
+				-- no modo "all" o mais perto ganha; nos outros, o mais valioso
+				local finalScore = (mode == "all") and (-dist) or score
+
+				if finalScore > bestScore then
+					best, bestScore, bestPos = obj, finalScore, pos
+				end
+			end
+		end
+	end
+
+	State.LastScore = (best and select(1, eggScore(best))) or 0
+	return best, bestPos
+end
+
+local function getRoot()
+	local char = Player.Character or Player.CharacterAdded:Wait()
+	return char:FindFirstChild("HumanoidRootPart"), char
+end
+
+--// ============ INSTANT INTERACT (v3) ================== //
+-- Expande o alcance, remove a exigência de linha de visão e zera o
+-- HoldDuration antes de disparar o prompt (é isso que faz funcionar).
+local function firePrompt(prompt)
+	if not prompt or not prompt:IsA("ProximityPrompt") then return false end
+	pcall(function()
+		prompt.MaxActivationDistance = math.max(prompt.MaxActivationDistance, 250)
+		prompt.RequiresLineOfSight = false
+		local oldHold = prompt.HoldDuration
+		if State.InstantInt then
+			prompt.HoldDuration = 0
+		end
+		prompt:InputHoldBegin()
+		task.wait(State.InstantInt and 0.02 or math.max(oldHold, 0.05))
+		prompt:InputHoldEnd()
+		prompt.HoldDuration = oldHold
+	end)
+	return true
+end
+
+-- Interage com todos os prompts de um objeto
+function interactObject(obj)
+	local count = 0
+	if obj:IsA("ProximityPrompt") then
+		if firePrompt(obj) then count += 1 end
+	end
+	for _, d in ipairs(obj:GetDescendants()) do
+		if d:IsA("ProximityPrompt") then
+			if firePrompt(d) then count += 1 end
+		end
+	end
+	return count
+end
+
+-- Interage com tudo que estiver perto (incubadora, shrine, ovos...)
+function interactNearby(pos, radius)
+	local count = 0
+	local seen = {}
+	for _, d in ipairs(workspace:GetDescendants()) do
+		if d:IsA("ProximityPrompt") then
+			local holder = d:FindFirstAncestorWhichIsA("BasePart", true) or d.Parent
+			local part = holder and (holder:IsA("BasePart") and holder or holder:FindFirstChildWhichIsA("BasePart", true))
+			if part and (part.Position - pos).Magnitude <= radius and not seen[part] then
+				seen[part] = true
+				if firePrompt(d) then count += 1 end
+			end
+		end
+	end
+	return count
+end
+
+--// ================ COLETA REAL ======================== //
+function collectEgg(egg)
+	-- 1) Remote do seu jogo (caminho mais limpo)
+	if PICKUP_REMOTE then
+		PICKUP_REMOTE:FireServer(egg)
+		return true
+	end
+
+	-- 2) Instant Interact em qualquer prompt dentro do ovo
+	local prompts = {}
+	for _, d in ipairs(egg:GetDescendants()) do
+		if d:IsA("ProximityPrompt") then table.insert(prompts, d) end
+	end
+	if egg:IsA("ProximityPrompt") then table.insert(prompts, egg) end
+
+	if #prompts > 0 then
+		for _, p in ipairs(prompts) do
+			firePrompt(p)
+		end
+		return true
+	end
+
+	-- 3) Gatilho por toque: encosta o personagem no ovo
+	local part = getEggPart(egg)
+	local root = getRoot()
+	if part and root then
+		root.CFrame = CFrame.new(part.Position + Vector3.new(0, (part.Size.Y / 2) + 2.5, 0))
+		task.wait(0.25)
+		return true
+	end
+
+	return false
+end
+
+--// ============ BASE DO JOGADOR ======================== //
+function findMyBase()
+	local candidates = {
+		workspace:FindFirstChild(Player.Name),
+		workspace:FindFirstChild("Bases"),
+		workspace:FindFirstChild("Base"),
+	}
+	for _, c in ipairs(candidates) do
+		if c then
+			if c.Name == Player.Name then
+				local p = c:FindFirstChildWhichIsA("BasePart", true)
+				if p then return p.Position end
+			end
+			local mine = c:FindFirstChild(Player.Name)
+			if mine then
+				local p = mine:FindFirstChildWhichIsA("BasePart", true)
+				if p then return p.Position end
+			end
+		end
+	end
+	for _, obj in ipairs(workspace:GetDescendants()) do
+		local n = obj.Name:lower()
+		if obj:IsA("BasePart") and (n == "base" or n == "home" or n == "ninho" or n:find("deposit", 1, true)) then
+			return obj.Position
+		end
+	end
+	return nil
+end
+
+--// ================ MOVIMENTO ========================== //
+function goToEgg(egg)
+	local _, pos = eggScore(egg)
+	if not pos then return end
+	local root = getRoot()
+	if not root then return end
+
+	if State.Smooth then
+		local dist = (root.Position - pos).Magnitude
+		local duration = math.clamp(dist / math.max(State.Speed, 1), 0.05, 1.5)
+		Tween(root, {CFrame = CFrame.new(pos + Vector3.new(0, 3, 0))}, duration, Enum.EasingStyle.Linear)
+	else
+		root.CFrame = CFrame.new(pos + Vector3.new(0, 3, 0))
+	end
+
+	if STEAL_REMOTE then
+		STEAL_REMOTE:FireServer(egg)
+	end
+end
+
+function returnToBase()
+	local basePos = findMyBase()
+	if not basePos then
+		notify("Não achei a sua base no mapa", Theme.Danger)
+		return
+	end
+	local root = getRoot()
+	if not root then return end
+
+	if State.Smooth then
+		local dist = (root.Position - basePos).Magnitude
+		local duration = math.clamp(dist / math.max(State.Speed, 1), 0.1, 2)
+		Tween(root, {CFrame = CFrame.new(basePos + Vector3.new(0, 3, 0))}, duration, Enum.EasingStyle.Linear)
+	else
+		root.CFrame = CFrame.new(basePos + Vector3.new(0, 3, 0))
+	end
+end
+
+--// ============ AVISO DE VELOCIDADE SEGURA ============= //
+local function checkSafeSpeed()
+	if not State.SafeSpeed then return end
+	local root = getRoot()
+	if not root then return end
+	local n = root.Position -- posição atual
+
+	for key, need in pairs(BIOME_SPEED) do
+		local zone = workspace:FindFirstChild(key, true)
+		if zone and need then
+			local part = zone:FindFirstChildWhichIsA("BasePart", true)
+			if part and (part.Position - n).Magnitude < 400 then
+				local humanoid = Player.Character and Player.Character:FindFirstChildWhichIsA("Humanoid")
+				local mySpeed = humanoid and humanoid.WalkSpeed or 0
+				if mySpeed > 0 and mySpeed < need then
+					notify(("⚠ Velocidade %d < recomendada %d (%s)"):format(mySpeed, need, key), Theme.Warning)
+				end
+			end
+		end
+	end
+end
+
+--// ============ LOOP: AUTO ROUBO ======================= //
+task.spawn(function()
+	while true do
+		if State.AutoSteal then
+			local egg = findBestEgg()
+			if egg then
+				State.Target = egg
+				targetInfo.Text = ("🎯 Alvo: %s  |  Score: %d"):format(egg.Name, State.LastScore)
+				targetInfo.TextColor3 = Theme.Success
+
+				checkSafeSpeed()
+				goToEgg(egg)
+				task.wait(0.25)
+
+				local root = getRoot()
+				local _, pos = eggScore(egg)
+				if root and pos and (root.Position - pos).Magnitude < 12 then
+					collectEgg(egg)          -- interação real no ovo
+					task.wait(0.2)
+					if State.AutoReturn then
+						returnToBase()       -- leva o ovo pra base pra chocar
+						task.wait(0.5)
+					end
+				end
+			else
+				targetInfo.Text = "Procurando ovos no modo atual..."
+				targetInfo.TextColor3 = Theme.SubText
+				task.wait(0.6)
+			end
+		else
+			task.wait(0.4)
+		end
+	end
+end)
+
+--// ============ LOOP: AUTO COLETAR ===================== //
+task.spawn(function()
+	while true do
+		if State.AutoCollect then
+			local root = getRoot()
+			if root then
+				for _, obj in ipairs(workspace:GetDescendants()) do
+					if isEgg(obj) then
+						local part = getEggPart(obj)
+						if part and (part.Position - root.Position).Magnitude < 16 then
+							collectEgg(obj)
+							task.wait(0.2)
+						end
+					end
+				end
+			end
+		end
+		task.wait(0.35)
+	end
+end)
+
+--// ============ LOOP: AUTO INTERAGIR =================== //
+task.spawn(function()
+	while true do
+		if State.AutoInteract then
+			local root = getRoot()
+			if root then
+				interactNearby(root.Position, 22)
+			end
+		end
+		task.wait(0.5)
+	end
+end)
+
+--// ============ LOOP: CRONÔMETRO DE OVOS =============== //
+task.spawn(function()
+	while true do
+		task.wait(1)
+		State.CycleLeft -= 1
+		if State.CycleLeft <= 0 then
+			State.CycleLeft = EGG_RESET_SECONDS
+			notify("🥚 Ovos novos spawnaram no mapa!", Theme.Accent2)
+		end
+		local m = math.floor(State.CycleLeft / 60)
+		local s = State.CycleLeft % 60
+		timerLabel.Text = ("Ovos novos em %d:%02d"):format(m, s)
+	end
+end)
+
+--// ================ DEBUG ============================== //
+function debugListEggs()
+	print("========== OVOS DETECTADOS PELO SHADOW HUB ==========")
+	local count = 0
+	for _, obj in ipairs(workspace:GetDescendants()) do
+		if isEgg(obj) then
+			count += 1
+			local score = select(1, eggScore(obj)) or 0
+			print(("[EGG] %s  (score %d)  modo-sakura=%s  modo-angels=%s"):format(
+				obj:GetFullName(), score,
+				tostring(matchesMode(obj, "sakura")),
+				tostring(matchesMode(obj, "angels"))
+			))
+		end
+	end
+	print("Total de ovos reconhecidos: " .. count)
+	notify("Ovos reconhecidos: " .. count .. " (veja o Output)", Theme.Accent2)
+end
+
+--// ============ MINIMIZAR / RESTAURAR / ABRIR ========== //
+local minimized = false
+local MIN_SIZE = UDim2.fromOffset(500, 430)
+local MIN_BAR  = UDim2.fromOffset(500, 54)
+
+local floatBtn = Instance.new("TextButton")
+floatBtn.Size = UDim2.fromOffset(58, 58)
+floatBtn.Position = UDim2.new(1, -84, 0.72, 0)
+floatBtn.BackgroundColor3 = Theme.Accent
+floatBtn.Text = "SH"
+floatBtn.TextColor3 = Theme.Text
+floatBtn.Font = Enum.Font.GothamBold
+floatBtn.TextSize = 16
+floatBtn.AutoButtonColor = false
+floatBtn.Visible = false
+floatBtn.Parent = gui
+Round(floatBtn, 100)
+Stroke(floatBtn, Theme.Accent2, 0.3, 2)
+Gradient(floatBtn, Theme.Accent, Theme.Accent2, 45)
+
+floatBtn.MouseEnter:Connect(function()
+	Tween(floatBtn, {Size = UDim2.fromOffset(66, 66), Position = UDim2.new(1, -88, 0.72, -4)}, 0.2, Enum.EasingStyle.Back)
+end)
+floatBtn.MouseLeave:Connect(function()
+	Tween(floatBtn, {Size = UDim2.fromOffset(58, 58), Position = UDim2.new(1, -84, 0.72, 0)}, 0.2)
+end)
+
+local function setWindowVisible(show)
+	State.Open = show
+	Tween(window, {Size = show and MIN_SIZE or UDim2.fromOffset(0, 0)}, 0.28, Enum.EasingStyle.Quad)
+	Tween(shadow, {Size = show and UDim2.fromOffset(528, 458) or UDim2.fromOffset(0, 0)}, 0.28)
+	floatBtn.Visible = not show
+end
+
+function toggleHub()
+	setWindowVisible(not State.Open)
+end
+
+btnMin.MouseButton1Click:Connect(function()
+	minimized = not minimized
+	local target = minimized and MIN_BAR or MIN_SIZE
+	Tween(window, {Size = target}, 0.3, Enum.EasingStyle.Quad)
+	Tween(shadow, {Size = target + UDim2.fromOffset(28, 28)}, 0.3)
+	notify(minimized and "Janela minimizada" or "Janela restaurada")
+end)
+
+btnClose.MouseButton1Click:Connect(function()
+	setWindowVisible(false)
+	notify("UI escondida • RightShift ou botão SH")
+end)
+
+floatBtn.MouseButton1Click:Connect(function()
+	minimized = false
+	setWindowVisible(true)
+	Tween(shadow, {Size = UDim2.fromOffset(528, 458)}, 0.3)
+end)
+
+UserInputService.InputBegan:Connect(function(input, gpe)
+	if gpe then return end
+	if input.KeyCode == Enum.KeyCode.RightShift then
+		toggleHub()
+	end
+end)
+
+--// ================ ARRASTAR A JANELA ================== //
+local dragging, dragStart, startPos
+
+header.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		dragging = true
+		dragStart = input.Position
+		startPos = window.Position
+	end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+	if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+		local delta = input.Position - dragStart
+		local newPos = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+		window.Position = newPos
+		shadow.Position = newPos
+	end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		dragging = false
+	end
+end)
+
+--// ============== HOVER DOS BOTÕES DO HEADER =========== //
+for _, b in ipairs({btnMin, btnClose}) do
+	b.MouseEnter:Connect(function() Tween(b, {BackgroundTransparency = 0.35}, 0.15) end)
+	b.MouseLeave:Connect(function()
+		Tween(b, {BackgroundTransparency = (b == btnClose) and 0.75 or 0}, 0.15)
+	end)
+end
+
+--// ================== INICIALIZAÇÃO ==================== //
+task.defer(function()
+	local first = true
+	for name, btn in pairs(tabButtons) do
+		btn.MouseButton1Click:Connect(function()
+			for n, p in pairs(pages) do
+				local active = (n == name)
+				p.Visible = active
+				Tween(tabButtons[n], {
+					TextColor3 = active and Theme.Text or Theme.SubText,
+					BackgroundTransparency = active and 0 or 0.2,
+				}, 0.2)
+			end
+		end)
+		if first then
+			pages[name].Visible = true
+			btn.TextColor3 = Theme.Text
+			btn.BackgroundTransparency = 0
+			first = false
+		end
+	end
+end)
+
+window.Size = UDim2.fromOffset(500, 0)
+shadow.Size = UDim2.fromOffset(528, 0)
+Tween(window, {Size = MIN_SIZE}, 0.45, Enum.EasingStyle.Back)
+Tween(shadow, {Size = UDim2.fromOffset(528, 458)}, 0.45, Enum.EasingStyle.Back)
+
+notify("🖤 Shadow HUB v3 carregado!", Theme.Accent2)
+print("[Shadow HUB] v3 • Instant Interact + modos de mira ativos")
